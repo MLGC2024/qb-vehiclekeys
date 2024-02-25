@@ -8,7 +8,6 @@ local isCarjacking = false
 local canCarjack = true
 local AlertSend = false
 local lastPickedVehicle = nil
-local usingAdvanced = false
 local IsHotwiring = false
 local trunkclose = true
 local looped = false
@@ -263,7 +262,43 @@ end)
 
 
 RegisterNetEvent('lockpicks:UseLockpick', function(isAdvanced)
-    LockpickDoor(isAdvanced)
+    local ped = PlayerPedId()
+    local pos = GetEntityCoords(ped)
+    local vehicle = QBCore.Functions.GetClosestVehicle()
+
+    if vehicle == nil or vehicle == 0 then return end
+    if HasKeys(QBCore.Functions.GetPlate(vehicle)) then return end
+    if #(pos - GetEntityCoords(vehicle)) > 2.5 then return end
+    if GetVehicleDoorLockStatus(vehicle) <= 0 then return end
+
+    local difficulty = isAdvanced and 'easy' or 'medium' -- Easy for advanced lockpick, medium by default
+    local success = exports['qb-minigames']:Skillbar(difficulty)
+
+    local chance = math.random()
+    if success then
+        TriggerServerEvent('hud:server:GainStress', math.random(1, 4))
+        lastPickedVehicle = vehicle
+
+        if GetPedInVehicleSeat(vehicle, -1) == PlayerPedId() then
+            TriggerServerEvent('qb-vehiclekeys:server:AcquireVehicleKeys', QBCore.Functions.GetPlate(vehicle))
+        else
+            QBCore.Functions.Notify(Lang:t("notify.vlockpick"), 'success')
+            TriggerServerEvent('qb-vehiclekeys:server:setVehLockState', NetworkGetNetworkIdFromEntity(vehicle), 1)
+        end
+    else
+        TriggerServerEvent('hud:server:GainStress', math.random(1, 4))
+        AttemptPoliceAlert("steal")
+    end
+
+    if isAdvanced then
+        if chance <= Config.RemoveLockpickAdvanced then
+            TriggerServerEvent("qb-vehiclekeys:server:breakLockpick", "advancedlockpick")
+        end
+    else
+        if chance <= Config.RemoveLockpickNormal then
+            TriggerServerEvent("qb-vehiclekeys:server:breakLockpick", "lockpick")
+        end
+    end
 end)
 -- Backwards Compatibility ONLY -- Remove at some point --
 RegisterNetEvent('vehiclekeys:client:SetOwner', function(plate)
@@ -299,14 +334,34 @@ function ToggleVehicleLockswithoutnui(veh)
         if not isBlacklistedVehicle(veh) then
             if HasKeys(QBCore.Functions.GetPlate(veh)) or AreKeysJobShared(veh) then
                 local ped = PlayerPedId()
-                local vehLockStatus = GetVehicleDoorLockStatus(veh)
+                local vehLockStatus, curVeh = GetVehicleDoorLockStatus(veh), GetVehiclePedIsIn(ped, false)
+                local object = 0
 
-                if not GetVehiclePedIsIn(ped) then
-                    loadAnimDict("anim@mp_player_intmenu@key_fob@")
-                    TaskPlayAnim(ped, 'anim@mp_player_intmenu@key_fob@', 'fob_click', 3.0, 3.0, -1, 49, 0, false, false, false)
+                if curVeh == 0 then
+                    if Config.LockToggleAnimation.Prop then
+                        object = CreateObject(joaat(Config.LockToggleAnimation.Prop), 0, 0, 0, true, true, true)
+                        while not DoesEntityExist(object) do Wait(1) end
+                        AttachEntityToEntity(object, ped, GetPedBoneIndex(ped, Config.LockToggleAnimation.PropBone),
+                            0.1, 0.0, 0.0, 0.0, 0.0, 0.0, true, true, false, true, 1, true)
+                    end
+
+                    loadAnimDict(Config.LockToggleAnimation.AnimDict)
+                    TaskPlayAnim(ped, Config.LockToggleAnimation.AnimDict, Config.LockToggleAnimation.Anim, 8.0, -8.0, -1, 52, 0, false, false, false)
+                    TriggerServerEvent("InteractSound_SV:PlayWithinDistance", 5.0, Config.LockAnimSound, 0.5)
                 end
 
-                TriggerServerEvent("InteractSound_SV:PlayWithinDistance", 5, "lock", 0.3)
+                Citizen.CreateThread(function()
+                    if curVeh == 0 then Wait(Config.LockToggleAnimation.WaitTime) end
+                    if IsEntityPlayingAnim(ped, Config.LockToggleAnimation.AnimDict, Config.LockToggleAnimation.Anim, 3) then
+                        StopAnimTask(ped, Config.LockToggleAnimation.AnimDict, Config.LockToggleAnimation.Anim, 8.0)
+                    end
+                    TriggerServerEvent("InteractSound_SV:PlayWithinDistance", 5, Config.LockToggleSound, 0.3)
+
+                    if object ~= 0 and DoesEntityExist(object) then
+                        DeleteObject(object)
+                        object = 0
+                    end
+                end)
 
                 NetworkRequestControlOfEntity(veh)
                 if vehLockStatus == 1 then
@@ -369,7 +424,7 @@ function GetVehicle()
 
     while vehicle == 0 do
         vehicle = QBCore.Functions.GetClosestVehicle()
-        if #(pos - GetEntityCoords(vehicle)) > 8 then
+        if #(pos - GetEntityCoords(vehicle)) > Config.LockToggleDist then
             QBCore.Functions.Notify(Lang:t("notify.vehclose"), "error")
             return
         end
@@ -542,50 +597,6 @@ function IsBlacklistedWeapon()
     return false
 end
 
-function LockpickDoor(isAdvanced)
-    local ped = PlayerPedId()
-    local pos = GetEntityCoords(ped)
-    local vehicle = QBCore.Functions.GetClosestVehicle()
-
-    if vehicle == nil or vehicle == 0 then return end
-    if HasKeys(QBCore.Functions.GetPlate(vehicle)) then return end
-    if #(pos - GetEntityCoords(vehicle)) > 2.5 then return end
-    if GetVehicleDoorLockStatus(vehicle) <= 0 then return end
-
-    usingAdvanced = isAdvanced
-    Config.LockPickDoorEvent()
-end
-
-function LockpickFinishCallback(success)
-    local vehicle = QBCore.Functions.GetClosestVehicle()
-
-    local chance = math.random()
-    if success then
-        TriggerServerEvent('hud:server:GainStress', math.random(1, 4))
-        lastPickedVehicle = vehicle
-
-        if GetPedInVehicleSeat(vehicle, -1) == PlayerPedId() then
-            TriggerServerEvent('qb-vehiclekeys:server:AcquireVehicleKeys', QBCore.Functions.GetPlate(vehicle))
-        else
-            QBCore.Functions.Notify(Lang:t("notify.vlockpick"), 'success')
-            TriggerServerEvent('qb-vehiclekeys:server:setVehLockState', NetworkGetNetworkIdFromEntity(vehicle), 1)
-        end
-
-    else
-        TriggerServerEvent('hud:server:GainStress', math.random(1, 4))
-        AttemptPoliceAlert("steal")
-    end
-
-    if usingAdvanced then
-        if chance <= Config.RemoveLockpickAdvanced then
-            TriggerServerEvent("qb-vehiclekeys:server:breakLockpick", "advancedlockpick")
-        end
-    else
-        if chance <= Config.RemoveLockpickNormal then
-            TriggerServerEvent("qb-vehiclekeys:server:breakLockpick", "lockpick")
-        end
-    end
-end
 
 function Hotwire(vehicle, plate)
     local hotwireTime = math.random(Config.minHotwireTime, Config.maxHotwireTime)
